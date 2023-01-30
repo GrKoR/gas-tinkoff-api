@@ -434,7 +434,7 @@ function TI_GetInstrumentsID() {
  * }
  * 
  * @param {"TCS00A102EQ8"} figi   FIGI инструмента
- * @param {optional false} forcedUpdate    Если TRUE, то игнорирровать кеш и принудительно обновиться с сервера
+ * @param {default = false} forcedUpdate    Если TRUE, то игнорирровать кеш и принудительно обновиться с сервера
  * @return {Object}               Параметры последней сделки.
  * @customfunction
  */
@@ -445,7 +445,7 @@ function _cachedLastPriceByFigi(figi, forcedUpdate = false){
   var last_price_cache_key = figi + price_postfix;
 
   const cached = CACHE.get(last_price_cache_key);
-  if (cached != null && !forcedUpdate) {
+  if (cached != null && !forcedUpdate) {
     return JSON.parse(cached);
   }
 
