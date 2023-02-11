@@ -5,6 +5,7 @@ const OPENAPI_TOKEN = scriptProperties.getProperty('OPENAPI_TOKEN')
 
 const CACHE = CacheService.getScriptCache()
 const CACHE_MAX_AGE = 21600 // 6 Hours
+const PRICE_CACHE_MAX_AGE = 60*60 // 1 Hour
 
 const TRADING_START_AT = new Date('Apr 01, 2020 10:00:00')
 const MILLIS_PER_DAY = 1000 * 60 * 60 * 24
@@ -108,6 +109,7 @@ function _getFigiByTicker(ticker) {
 
 /**
  * Получение последней цены инструмента по тикеру
+ * 
  * @param {"GAZP"} ticker Тикер инструмента
  * @return {}             Last price
  * @customfunction
@@ -122,6 +124,7 @@ function getPriceByTicker(ticker, dummy) {
 
 /**
  * Получение Bid/Ask спреда инструмента по тикеру
+ * 
  * @param {"GAZP"} ticker Тикер инструмента
  * @return {0.03}         Спред в %
  * @customfunction
@@ -176,15 +179,15 @@ function _calculateTrades(trades) {
 }
 
 /**
- * Получение списка операций по тикеру инструмента
- * @param {String} ticker Тикер инструмента для фильтрации
+ * Получение списка операций по FIGI инструмента
+ * 
+ * @param {String} figi FIGI инструмента для фильтрации
  * @param {String} from Начальная дата
- * @param {String} to Конечная дата
- * @return {Array} Массив результата
+ * @param {String} to   Конечная дата
+ * @return {Array}      Массив результата
  * @customfunction
  */
-function getTrades(ticker, from, to) {
-  const figi = _getFigiByTicker(ticker)
+function getTradesByFigi(figi, from, to) {
   if (!from) {
     from = TRADING_START_AT.toISOString()
   }
@@ -214,14 +217,37 @@ function getTrades(ticker, from, to) {
       com_val = null
     }
     values.push([
-      id, isoToDate(date), operationType, ticker, totalQuantity, weigthedPrice, currency, totalSum, com_val
+      id,
+      isoToDate(date),
+      operationType,
+      _GetTickerNameByFIGI(figi),
+      totalQuantity,
+      weigthedPrice,
+      currency,
+      totalSum,
+      com_val
     ])
   }
   return values
 }
 
 /**
+ * Получение списка операций по тикеру инструмента
+ * 
+ * @param {String} ticker Тикер инструмента для фильтрации
+ * @param {String} from Начальная дата
+ * @param {String} to Конечная дата
+ * @return {Array} Массив результата
+ * @customfunction
+ */
+function getTradesByTicker(ticker, from, to) {
+  const figi = _getFigiByTicker(ticker);
+  return getTradesByFigi(figi, from, to);
+}
+
+/**
  * Получение портфеля
+ * 
  * @return {Array}     Массив с результатами
  * @customfunction
  */
@@ -364,8 +390,18 @@ function _GetTickerNameByFIGI(figi) {
   return [ticker,name]
 }
 
+/**
+ * Получение таблицы торгуемых активов.
+ * 
+ * @return {Array}     Массив с результатами
+ * @customfunction
+ */
 function TI_GetInstrumentsID() {
-  const AllInstruments = tinkoffClientV2._Bonds('INSTRUMENT_STATUS_BASE').instruments.concat(tinkoffClientV2._Shares('INSTRUMENT_STATUS_BASE').instruments, tinkoffClientV2._Futures('INSTRUMENT_STATUS_BASE').instruments, tinkoffClientV2._Etfs('INSTRUMENT_STATUS_BASE').instruments)
+  const AllInstruments = tinkoffClientV2._Bonds('INSTRUMENT_STATUS_BASE').instruments.concat(
+    tinkoffClientV2._Shares('INSTRUMENT_STATUS_BASE').instruments,
+    tinkoffClientV2._Futures('INSTRUMENT_STATUS_BASE').instruments,
+    tinkoffClientV2._Etfs('INSTRUMENT_STATUS_BASE').instruments
+  );
   Logger.log(`[TI_GetInstrumentsID()] Number of instruments: ${AllInstruments.length}`)
 
   const values = []
@@ -373,34 +409,153 @@ function TI_GetInstrumentsID() {
 
   for (let i=0; i < AllInstruments.length; i++) {
     values.push([
-      AllInstruments[i].ticker,AllInstruments[i].figi,AllInstruments[i].name,AllInstruments[i].classCode,AllInstruments[i].exchange,AllInstruments[i].currency,AllInstruments[i].lot,AllInstruments[i].isin,AllInstruments[i].uid
+      AllInstruments[i].ticker,
+      AllInstruments[i].figi,
+      AllInstruments[i].name,
+      AllInstruments[i].classCode,
+      AllInstruments[i].exchange,
+      AllInstruments[i].currency,
+      AllInstruments[i].lot,
+      AllInstruments[i].isin,
+      AllInstruments[i].uid
     ])
   }
   return values
 }
 
+/**
+ * Получение из кеша параметров последней сделки по FIGI.
+ * Возвращает такой объект:
+ * {
+ *   price= {units=0, nano=1.018E8},
+ *   time="2023-01-27T15:44:30.460707Z",
+ *   figi="TCS00A102EQ8",
+ *   instrumentUid="34749829-f857-4d66-9421-cc9aa236b708"
+ * }
+ * 
+ * @param {"TCS00A102EQ8"} figi   FIGI инструмента
+ * @param {default = false} forcedUpdate    Если TRUE, то игнорирровать кеш и принудительно обновиться с сервера
+ * @return {Object}               Параметры последней сделки.
+ * @customfunction
+ */
+function _cachedLastPriceByFigi(figi, forcedUpdate = false){
+  if (typeof figi != 'string') return;
+
+  const price_postfix = '_price';
+  var last_price_cache_key = figi + price_postfix;
+
+  const cached = CACHE.get(last_price_cache_key);
+  if (cached != null && !forcedUpdate) {
+    return JSON.parse(cached);
+  }
+
+  const data = tinkoffClientV2._GetLastPrices([figi])
+  CACHE.put(last_price_cache_key, JSON.stringify(data.lastPrices[0]), PRICE_CACHE_MAX_AGE);
+  return data.lastPrices[0];
+}
+
+/**
+ * Получение цены последней сделки по FIGI.
+ * 
+ * @param {"TCS00A102EQ8"} figi FIGI инструмента
+ * @return {Number}     Цена последней сделки
+ * @customfunction
+ */
 function TI_GetLastPriceByFigi(figi) {
   if (figi) {
-    const data = tinkoffClientV2._GetLastPrices([figi])
-    return Number(data.lastPrices[0].price.units) + data.lastPrices[0].price.nano/1000000000
+    const data = _cachedLastPriceByFigi(figi);
+
+    return Number(data.price.units) + data.price.nano/1000000000
   }
 }
 
-function TI_GetLastPrice(ticker) {
-  const figi = _getFigiByTicker(ticker)    // Tinkoff API v1 function !!!
+/**
+ * Получение цены последней сделки по тикеру.
+ * 
+ * @param {"TSPX"} ticker Тикер инструмента
+ * @return {Number}     Цена последней сделки
+ * @customfunction
+ */
+function TI_GetLastPriceByTicker(ticker) {
+  const figi = _getFigiByTicker(ticker);    // Tinkoff API v1 function !!!
   if (figi) {
-    return TI_GetLastPriceByFigi(figi)
+    return TI_GetLastPriceByFigi(figi);
   }
 }
 
+/**
+ * Получение даты и времени последней сделки по FIGI.
+ * 
+ * @param {"TCS00A102EQ8"} figi FIGI инструмента
+ * @return {Date}     Дата и время последней сделки
+ * @customfunction
+ */
+function TI_GetLastPriceDateByFigi(figi) {
+  if (figi) {
+    const data = _cachedLastPriceByFigi(figi);
+
+    return new Date(data.time);
+  }
+}
+
+/**
+ * Получение даты и времени последней сделки по тикеру.
+ * 
+ * @param {"TSPX"} ticker Тикер инструмента
+ * @return {Date}     Дата и время последней сделки
+ * @customfunction
+ */
+function TI_GetLastPriceDateByTicker(ticker) {
+  const figi = _getFigiByTicker(ticker);    // Tinkoff API v1 function !!!
+  if (figi) {
+    return TI_GetLastPriceDateByFigi(figi);
+  }
+}
+
+/**
+ * Получение номеров счетов, доступных для скрипта.
+ * 
+ * @return {Array}     Массив с результатами
+ * @customfunction
+ */
 function TI_GetAccounts() {
   const data = tinkoffClientV2._GetAccounts()
 
-  return data.accounts[0].id //FIXME!!!
+  const values = []
+  // Don't forget to change TI_GetFirstAccount() function if you will egit the order of fields here. 
+  values.push(["Name","Status","id","type","access level","opened date","closed date"])
+
+  for (let i=0; i < data.accounts.length; i++) {
+    values.push([
+      data.accounts[i].name,
+      data.accounts[i].status,
+      data.accounts[i].id,
+      data.accounts[i].type,
+      data.accounts[i].accessLevel,
+      new Date(data.accounts[i].openedDate),
+      ((data.accounts[i].closedDate == '1970-01-01T00:00:00Z') ? '' : new Date(data.accounts[i].closedDate)),
+    ]);
+    
+  }
+  return values
+}
+
+/**
+ * Получение номера первого из доступных счетов.
+ * 
+ * @return {String}     Номер первого доступного счета
+ * @customfunction
+ */
+function TI_GetFirstAccount() {
+  const accounts = TI_GetAccounts();
+  if (accounts.length > 1) {
+    return accounts[1][2];
+  }
 }
 
 /**
  * Получение Bid/Ask спреда инструмента по тикеру
+ * 
  * @param {"GAZP"} ticker Тикер инструмента
  * @return {0.03}         Спред в %
  * @customfunction
@@ -418,6 +573,7 @@ function TI_GetBidAskSpread(ticker) {
 
 /**
  * Получение портфеля
+ * 
  * @param {"12345678"} accountId  Номер брокерского счета
  * @return {Array}                Массив с результатами
  * @customfunction
@@ -469,6 +625,7 @@ function _TI_CalculateTrades(trades) {
 
 /**
  * Получение операций по счету
+ * 
  * @param {"12345678"} accountId  Номер брокерского счета
  * @param {2020-02-20} from_param [From date] - Optional
  * @param {2020-12-31} to_param   [To date] - Optional
